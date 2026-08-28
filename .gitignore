@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+artifacts/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Runtime corpus and generated experiment output are acquired locally.
+data/
+code/artifacts/
+code/reports/
+code/configs/
