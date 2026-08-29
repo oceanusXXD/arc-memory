@@ -88,6 +88,9 @@ def _load_manifest(path: str | Path) -> dict:
         missing = required - set(row)
         if missing:
             raise ValueError(f"query oracle example 缺少 {sorted(missing)}。")
+        for field in required:
+            if not isinstance(row[field], str) or not row[field].strip():
+                raise ValueError(f"query oracle example 的 {field} 必须是非空字符串。")
         if row["split"] not in {"train", "test"}:
             raise ValueError("query oracle split 只能为 train 或 test。")
         if row["profile"] not in profiles:
@@ -119,7 +122,19 @@ def _select_examples(conversations: list[dict], manifest: dict) -> list[dict]:
         query = matches[0]
         if not query["evidence"]:
             raise ValueError("query oracle example 必须至少有一条真实 evidence turn。")
-        evidence_indexes = [conversation["dia_to_index"][value] for value in query["evidence"]]
+        missing_evidence = [
+            value
+            for value in query["evidence"]
+            if value not in conversation["dia_to_index"]
+        ]
+        if missing_evidence:
+            raise ValueError(
+                f"conversation {label['conversation_id']!r} 的 query "
+                f"{label['question']!r} 无法映射 evidence {missing_evidence!r}。"
+            )
+        evidence_indexes = [
+            conversation["dia_to_index"][value] for value in query["evidence"]
+        ]
         evidence_turns = [conversation["turns"][index] for index in evidence_indexes]
         profile = manifest["value_profiles"][label["profile"]]
         values = np.asarray(
@@ -250,9 +265,16 @@ def _draft_statistics(item: dict, cfg: R2WConfig) -> np.ndarray:
 
 
 def _costs_from_drafts(drafts: np.ndarray) -> np.ndarray:
-    return np.column_stack(
-        (drafts[:, 0] + drafts[:, 1], drafts[:, 1], drafts[:, 0])
-    ).astype(np.float32)
+    """按生产口径返回 write/index/reader_payload；零惩罚诊断仍保留真实形状。"""
+    drafts = np.asarray(drafts, dtype=np.float32)
+    if drafts.shape != (len(STRUCT_ACTIONS), 5):
+        raise ValueError("query oracle 草稿成本必须按十臂 [arm, 5] 对齐。")
+    payload = drafts[:, 0]
+    total = payload + drafts[:, 1]
+    costs = np.column_stack((total, total, payload)).astype(np.float32)
+    # raw 已经存在，无需额外写入；它仍完整进入索引和 reader context。
+    costs[0] = (0.0, payload[0], payload[0])
+    return costs
 
 
 def _arrays(items: list[dict], cfg: R2WConfig) -> tuple[np.ndarray, ...]:
@@ -335,6 +357,12 @@ def run_query_oracle_validation(
             predicted_index = int(decision.action_index)
             predicted_action = STRUCT_ACTIONS[predicted_index]
         oracle_index = item["oracle_index"]
+        oracle_compression, oracle_key_axis = ACTION_FACTORS[
+            STRUCT_ACTIONS[oracle_index]
+        ]
+        predicted_factors = (
+            None if predicted_index is None else ACTION_FACTORS[predicted_action]
+        )
         order = np.argsort(-predicted_effects[index], kind="stable")
         oracle_rank = int(np.flatnonzero(order == oracle_index)[0]) + 1
         chosen_oracle_value = (
@@ -351,6 +379,14 @@ def run_query_oracle_validation(
                 "oracle_action": STRUCT_ACTIONS[oracle_index],
                 "predicted_action": predicted_action,
                 "match": predicted_action == STRUCT_ACTIONS[oracle_index],
+                "compression_axis_match": (
+                    predicted_factors is not None
+                    and predicted_factors[0] == oracle_compression
+                ),
+                "key_axis_match": (
+                    predicted_factors is not None
+                    and predicted_factors[1] == oracle_key_axis
+                ),
                 "oracle_rank_by_predicted_value": oracle_rank,
                 "top3_contains_oracle": oracle_rank <= 3,
                 "oracle_regret": float(item["oracle_values"].max() - chosen_oracle_value),
@@ -380,6 +416,11 @@ def run_query_oracle_validation(
     )
     majority_action = train_action_counts.most_common(1)[0][0]
     majority_matches = test_action_counts[majority_action]
+    covered_actions = [
+        action
+        for action in STRUCT_ACTIONS
+        if train_action_counts[action] or test_action_counts[action]
+    ]
     absolute_errors = np.abs(
         predicted_effects
         - np.stack([item["oracle_values"] for item in test_items]).astype(np.float32)
@@ -387,9 +428,12 @@ def run_query_oracle_validation(
     return {
         "kind": "manual_query_value_gbm_diagnostic",
         "warning": (
-            "人工 value profile 只验证 GBM 的逐臂 value 学习和 argmax 链路；"
-            "它不是 L2 causal-effect 或 LoCoMo benchmark 结果。"
+            "人工 profile 为同类 query-memory 样本复用十臂 value；该诊断只验证"
+            "GBM 的逐臂 value 学习与决策链路，不代表 L2 causal-effect、检索效果或"
+            "LoCoMo benchmark。"
         ),
+        "decision_target": "gold evidence memory representation conditioned on its real query",
+        "oracle_labeling": "each example selects one manual profile whose ten values are shared",
         "offline_guarantees": [
             "no_api",
             "no_embedding",
@@ -412,8 +456,12 @@ def run_query_oracle_validation(
             "oracle_action",
             "oracle_values",
         ],
-        "selection_rule": "DecisionPolicy with zero cost penalties; argmax(predicted action value)",
+        "selection_rule": (
+            "zero-cost DecisionPolicy admission gate followed by argmax(predicted action value)"
+        ),
         "actions": list(STRUCT_ACTIONS),
+        "covered_oracle_best_actions": covered_actions,
+        "oracle_best_action_coverage": len(covered_actions) / len(STRUCT_ACTIONS),
         "base_feature_names": list(FEATURE_NAMES),
         "train_conversations": len(train_groups),
         "train_examples": len(train_items),
@@ -426,6 +474,11 @@ def run_query_oracle_validation(
         "train_majority_action_accuracy": majority_matches / len(test_items),
         "matched_oracle_actions": matched,
         "oracle_action_accuracy": matched / len(rows),
+        "compression_axis_accuracy": sum(
+            row["compression_axis_match"] for row in rows
+        )
+        / len(rows),
+        "key_axis_accuracy": sum(row["key_axis_match"] for row in rows) / len(rows),
         "top3_oracle_accuracy": sum(row["top3_contains_oracle"] for row in rows)
         / len(rows),
         "mean_oracle_rank": float(

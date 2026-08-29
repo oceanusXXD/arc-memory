@@ -11,6 +11,7 @@ from r2w.model import stage2_matrix
 from r2w.pipeline_query_oracle_gbm import (
     FEATURE_NAMES,
     _base_features,
+    _costs_from_drafts,
     _draft_statistics,
     _load_manifest,
     _select_examples,
@@ -66,6 +67,15 @@ class QueryOracleGBMTests(unittest.TestCase):
         self.assertEqual(float(drafts[0, 0, 4]), 0.0)
         self.assertEqual(float(drafts[0, 5, 4]), 1.0)
 
+        costs = _costs_from_drafts(drafts[0])
+        raw_payload = float(drafts[0, 0, 0])
+        self.assertEqual(tuple(costs[0]), (0.0, raw_payload, raw_payload))
+        nonraw_total = float(drafts[0, 1, 0] + drafts[0, 1, 1])
+        self.assertEqual(
+            tuple(costs[1]),
+            (nonraw_total, nonraw_total, float(drafts[0, 1, 0])),
+        )
+
     def test_manifest_rejects_incomplete_action_values(self):
         manifest = _load_manifest(self.manifest_path)
         profile = next(iter(manifest["value_profiles"].values()))
@@ -75,6 +85,31 @@ class QueryOracleGBMTests(unittest.TestCase):
             path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "给齐十个 action value"):
                 _load_manifest(path)
+
+    def test_manifest_rejects_tied_or_nonfinite_values_and_bad_fields(self):
+        cases = []
+        tied = _load_manifest(self.manifest_path)
+        profile = next(iter(tied["value_profiles"].values()))
+        maximum = max(profile["values"].values())
+        profile["values"][STRUCT_ACTIONS[0]] = maximum
+        cases.append((tied, "唯一最佳 action"))
+
+        nonfinite = _load_manifest(self.manifest_path)
+        profile = next(iter(nonfinite["value_profiles"].values()))
+        profile["values"][STRUCT_ACTIONS[0]] = float("nan")
+        cases.append((nonfinite, "必须是有限数"))
+
+        bad_field = _load_manifest(self.manifest_path)
+        bad_field["examples"][0]["question"] = 42
+        cases.append((bad_field, "question 必须是非空字符串"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (manifest, message) in enumerate(cases):
+                with self.subTest(message=message):
+                    path = Path(directory) / f"bad-{index}.json"
+                    path.write_text(json.dumps(manifest), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        _load_manifest(path)
 
 
 if __name__ == "__main__":

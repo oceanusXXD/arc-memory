@@ -98,6 +98,36 @@ python -m r2w.pipeline_calibrate `
   --lambda-w 0.0 --lambda-r 0.01 --lambda-s 0.0
 ```
 
+## 无 API 的人工 value 诊断
+
+`pipeline_query_oracle_gbm` 用真实 LoCoMo query 作为条件，为该 query 的 gold
+evidence memory 选择存储 action。它通过确定性的 query/memory 统计、交互特征、草稿
+维度和生产十臂特征训练同一个 pooled GBM，再由零成本 `DecisionPolicy` 选择预测 value
+最高的 action。整个过程不调用 API、embedding、LLM、QG 或 reader：
+
+```powershell
+python -m r2w.pipeline_query_oracle_gbm `
+  --data ../data/LoCoMo/data/locomo10.json `
+  --manifest oracle_manifests/locomo_query_value_oracle.json `
+  --out reports/locomo-query-value-oracle-gbm.json
+```
+
+清单包含 7 个 train conversation 的 42 个 query-memory 样本和 3 个完全隔离的 test
+conversation 的 18 个样本。每条样本人工选择一个 value profile；同一 profile 复用一组
+完整的十臂 value。answer、LoCoMo category、profile 名和 oracle value 均不进入特征。
+当前 profile 的 oracle-best 覆盖 6/10 个 action，因此它验证十臂 value 排序链路和六类
+最佳 action 的泛化，尚未覆盖每个 action 都成为最佳臂的情况。
+
+当前固定清单的参考结果是严格 action 一致 9/18（50.0%）、oracle 位于预测 Top-3
+15/18（83.3%）、compression 轴一致 14/18（77.8%）、key 轴一致 11/18
+（61.1%）。训练集多数 action 在 test 上为 6/18（33.3%），十臂均匀随机期望为
+10%。严格不一致也可能来自 profile 对不同长度或冗余 memory 复用同一 value；报告会保留
+逐样本十臂 oracle/predicted value、rank 和 regret 供人工审计。
+
+这个结果是人工 value 与 gold evidence 条件下的离线诊断。它不代表 L2 causal effect、
+真实检索、写入端到端效果或 LoCoMo benchmark；真实训练仍使用上一节的
+`pipeline_train`。
+
 ## 公平基线
 
 `raw` 是主基线 `always_raw_naive_rag`：每个 turn 原样入索引，随后使用与 R2W 相同的 embedding、RRF、`retrieval_k` 和 reader。`none` 只是无热记忆诊断线；它不是 Naive RAG。`full_history_context` 是不经检索而将完整历史交给 reader 的长上下文参考线。
