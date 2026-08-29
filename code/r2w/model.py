@@ -1,150 +1,80 @@
-"""按 conversation 分组的 R2W pooled LightGBM 集成。"""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 import numpy as np
-from sklearn.model_selection import GroupKFold
-
 from .config import R2WConfig
 
 
-def arm_features(action_count: int) -> np.ndarray:
-    """十臂的固定特征：压缩位、索引卡 one-hot 与 arm one-hot。"""
-    if action_count != 10:
-        raise ValueError("R2W 的 arm 特征固定对应十个存储动作。")
-    rows = []
-    for index in range(action_count):
-        compression = float(index >= 5)
-        key = index % 5
-        key_vector = [float(position == key) for position in range(5)]
-        arm_vector = [float(position == index) for position in range(action_count)]
-        rows.append([compression, *key_vector, *arm_vector])
-    return np.asarray(rows, dtype=np.float32)
+def _regressor(cfg:R2WConfig,seed:int):
+    try:
+        from lightgbm import LGBMRegressor
+        return LGBMRegressor(objective="huber",n_estimators=200,learning_rate=.05,num_leaves=15,min_child_samples=10,random_state=seed,verbosity=-1)
+    except ImportError:
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        return HistGradientBoostingRegressor(loss="absolute_error",random_state=seed)
+
+@dataclass
+class DoubleContrastEnsemble:
+    raw_models:list
+    form_models:list
+    read_models:list
+    cheap_models:list
+    actions:tuple[str,...]
+
+    @staticmethod
+    def _pred(models,x):
+        p=np.vstack([np.asarray(m.predict(x),dtype=float) for m in models]);
+        return p.mean(0),p.std(0,ddof=1) if len(models)>1 else np.zeros(p.shape[1])
+
+    def predict_raw(self,x): return self._pred(self.raw_models,x)
+    def predict_form(self,x): return self._pred(self.form_models,x)
+    def predict_read(self,x): return self._pred(self.read_models,x)
+    def predict_cheap(self,x): return self._pred(self.cheap_models,x)
 
 
-def stage2_matrix(
-    base_features: np.ndarray, draft_statistics: np.ndarray, action_count: int = 10
-) -> np.ndarray:
-    """把一条记忆展开为十条 pooled arm 样本。"""
-    base = np.asarray(base_features, dtype=np.float32)
-    draft = np.asarray(draft_statistics, dtype=np.float32)
-    if base.ndim != 2 or draft.shape[:2] != (len(base), action_count):
-        raise ValueError("stage2 特征与草稿统计必须按 [turn, arm] 对齐。")
-    arms = arm_features(action_count)
-    return np.concatenate(
-        (
-            np.repeat(base, action_count, axis=0),
-            np.tile(arms, (len(base), 1)),
-            draft.reshape(len(base) * action_count, -1),
-        ),
-        axis=1,
-    ).astype(np.float32)
+def train_double_contrast(cfg:R2WConfig, raw_x, raw_y, form_x, form_y, read_x, read_y, cheap_x, cheap_y, groups, n_models=5)->DoubleContrastEnsemble:
+    from sklearn.model_selection import GroupKFold
+    groups=np.asarray(groups); unique=np.unique(groups)
+    if len(unique)<n_models: raise ValueError("训练至少需要与 ensemble 数相同的独立对话。")
+    raw_x=np.asarray(raw_x); raw_y=np.asarray(raw_y); form_x=np.asarray(form_x); form_y=np.asarray(form_y); read_x=np.asarray(read_x); read_y=np.asarray(read_y); cheap_x=np.asarray(cheap_x); cheap_y=np.asarray(cheap_y)
+    # form/read/cheap rows carry a first column source-row index to map group without leaking it into model.
+    folds=GroupKFold(n_splits=n_models); raws=[]; forms=[]; reads=[]; cheaps=[]
+    for f,(tr,_) in enumerate(folds.split(raw_x,groups=groups)):
+        allowed=set(tr.tolist())
+        rm=_regressor(cfg,cfg.random_seed+f); rm.fit(raw_x[tr],raw_y[tr]); raws.append(rm)
+        def fit_rows(x,y,seed):
+            idx=x[:,0].astype(int); mask=np.array([i in allowed for i in idx]); m=_regressor(cfg,seed); m.fit(x[mask,1:],y[mask]); return m
+        forms.append(fit_rows(form_x,form_y,cfg.random_seed+100+f)); reads.append(fit_rows(read_x,read_y,cfg.random_seed+200+f)); cheaps.append(fit_rows(cheap_x,cheap_y,cfg.random_seed+300+f))
+    return DoubleContrastEnsemble(raws,forms,reads,cheaps,cfg.storage_actions)
 
 
 @dataclass
-class GBMEnsemble:
-    admission_models: list
-    effect_models: list
-    hit_models: list
-    action_count: int = 10
+class DoubleContrastValueModel:
+    """Adapter used by OnlineWriter. Cheap rows are pooled action rows; full model enforces DeltaE=DeltaE_raw+DeltaF."""
+    ensemble: DoubleContrastEnsemble
 
-    @staticmethod
-    def _predict(models: list, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if not models:
-            raise RuntimeError("GBM ensemble 为空。")
-        predictions = np.vstack(
-            [np.asarray(model.predict(values), dtype=np.float32) for model in models]
-        )
-        return predictions.mean(axis=0), predictions.std(axis=0, ddof=1)
+    def cheap(self, action:str, features):
+        from .policy import Estimate
+        # append action one-hot so one shared cheap model predicts every deployable arm
+        one=np.asarray([float(action==a) for a in self.ensemble.actions],dtype=float)
+        x=np.concatenate([np.asarray(features,dtype=float),one])[None,:]
+        mean,sigma=self.ensemble.predict_cheap(x)
+        return Estimate(float(mean[0]),float(sigma[0]))
 
-    def predict_admission(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return self._predict(self.admission_models, values)
+    def full(self, action:str, features, raw_features):
+        from .policy import Stage2Estimate
+        if raw_features is None:
+            raw_features=features
+        raw_mean,raw_sigma=self.ensemble.predict_raw(np.asarray(raw_features,dtype=float)[None,:])
+        if action=="raw":
+            return Stage2Estimate(float(raw_mean[0]),float(raw_sigma[0]),0.0)
+        # Independent model ensembles use matched model index; compute paired DeltaE predictions.
+        raw_preds=np.asarray([m.predict(np.asarray(raw_features,dtype=float)[None,:])[0] for m in self.ensemble.raw_models],dtype=float)
+        form_preds=np.asarray([m.predict(np.asarray(features,dtype=float)[None,:])[0] for m in self.ensemble.form_models],dtype=float)
+        de_preds=raw_preds+form_preds
+        mean=float(de_preds.mean()); sigma=float(de_preds.std(ddof=1)) if len(de_preds)>1 else 0.0
+        fs=float(form_preds.std(ddof=1)) if len(form_preds)>1 else 0.0
+        return Stage2Estimate(mean,sigma,fs)
 
-    def predict_arms(
-        self, base_features: np.ndarray, draft_statistics: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        matrix = stage2_matrix(base_features, draft_statistics, self.action_count)
-        effect, sigma = self._predict(self.effect_models, matrix)
-        hit, _ = self._predict(self.hit_models, matrix)
-        count = len(base_features)
-        return (
-            effect.reshape(count, self.action_count),
-            np.clip(hit.reshape(count, self.action_count), 0.0, 1.0),
-            sigma.reshape(count, self.action_count),
-        )
-
-
-def _regressor(cfg: R2WConfig, objective: str, seed: int):
-    try:
-        from lightgbm import LGBMRegressor
-    except ImportError as exc:
-        raise RuntimeError("R2W-GBM 需要 lightgbm；请安装 requirements.txt。") from exc
-    return LGBMRegressor(
-        objective=objective,
-        n_estimators=cfg.gbm_estimators,
-        learning_rate=cfg.gbm_learning_rate,
-        num_leaves=cfg.gbm_num_leaves,
-        min_child_samples=cfg.gbm_min_child_samples,
-        random_state=seed,
-        verbosity=-1,
-    )
-
-
-def train_gbm_ensemble(
-    cfg: R2WConfig,
-    admission_features: np.ndarray,
-    admission_target: np.ndarray,
-    arm_base_features: np.ndarray,
-    draft_statistics: np.ndarray,
-    effects: np.ndarray,
-    hit_rates: np.ndarray,
-    measured: np.ndarray,
-    standard_errors: np.ndarray,
-    conversation_ids: np.ndarray,
-) -> GBMEnsemble:
-    """训练五个互斥 conversation fold 模型，不把最优 arm 压成类别标签。"""
-    groups = np.asarray(conversation_ids)
-    unique_groups = np.unique(groups)
-    if len(unique_groups) < cfg.gbm_folds:
-        raise ValueError("R2W-GBM 训练至少需要五段独立对话。")
-    admission_features = np.asarray(admission_features, dtype=np.float32)
-    admission_target = np.asarray(admission_target, dtype=np.float32)
-    base = np.asarray(arm_base_features, dtype=np.float32)
-    effects = np.asarray(effects, dtype=np.float32)
-    hit_rates = np.asarray(hit_rates, dtype=np.float32)
-    measured = np.asarray(measured, dtype=bool)
-    standard_errors = np.asarray(standard_errors, dtype=np.float32)
-    if effects.shape != hit_rates.shape or effects.shape != measured.shape:
-        raise ValueError("逐臂标签必须有相同 [turn, arm] 形状。")
-    if len(base) != len(groups) or len(admission_features) != len(groups):
-        raise ValueError("特征与 conversation_ids 必须逐 turn 对齐。")
-
-    matrix = stage2_matrix(base, draft_statistics, effects.shape[1])
-    flat_groups = np.repeat(groups, effects.shape[1])
-    flat_mask = measured.reshape(-1)
-    flat_effects = effects.reshape(-1)
-    flat_hits = np.clip(hit_rates.reshape(-1), 0.0, 1.0)
-    flat_se = standard_errors.reshape(-1)
-    folds = GroupKFold(n_splits=cfg.gbm_folds)
-    admissions, effect_models, hit_models = [], [], []
-    for fold, (train_index, _) in enumerate(folds.split(admission_features, groups=groups)):
-        admission = _regressor(cfg, "huber", cfg.random_seed + fold)
-        admission.fit(admission_features[train_index], admission_target[train_index])
-        admissions.append(admission)
-
-        train_groups = set(groups[train_index].tolist())
-        arm_train = flat_mask & np.isin(flat_groups, list(train_groups))
-        if not arm_train.any():
-            raise RuntimeError("一个 GBM fold 没有 measured arm 标签。")
-        weights = None
-        if cfg.inverse_variance_weights:
-            weights = 1.0 / np.maximum(flat_se[arm_train] ** 2, 1e-6)
-        effect = _regressor(cfg, "huber", cfg.random_seed + 100 + fold)
-        effect.fit(matrix[arm_train], flat_effects[arm_train], sample_weight=weights)
-        effect_models.append(effect)
-        hit = _regressor(cfg, "binary", cfg.random_seed + 200 + fold)
-        hit.fit(matrix[arm_train], flat_hits[arm_train])
-        hit_models.append(hit)
-    return GBMEnsemble(admissions, effect_models, hit_models, effects.shape[1])
+    def read_cost(self,action:str,features)->float:
+        mean,_=self.ensemble.predict_read(np.asarray(features,dtype=float)[None,:])
+        return max(0.0,float(mean[0]))

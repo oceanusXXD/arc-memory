@@ -1,130 +1,48 @@
 from __future__ import annotations
-
-import hashlib
-
 import numpy as np
-
-from r2w.query_generator import GeneratedQueries
-from r2w.teacher import ReaderAnswer
-
+from r2w.policy import Estimate, Stage2Estimate
+from r2w.costs import SelectResources, CommitResources, IndexResources, ReadResources, ResourceLedger
 
 class FakeEmbedder:
-    def __init__(self, dim: int):
-        self.dim = dim
-
-    def encode(self, texts, normalize_embeddings=True, batch_size=128):
-        rows = []
+    def __init__(self,dim=8): self.dim=dim
+    def encode(self,texts,normalize_embeddings=True,batch_size=128):
+        out=[]
         for text in texts:
-            digest = hashlib.sha256(str(text).encode("utf-8")).digest()
-            row = np.frombuffer(digest, dtype=np.uint8).astype(np.float32)
-            row = np.resize(row, self.dim)
-            row /= np.linalg.norm(row) or 1.0
-            rows.append(row)
-        return np.asarray(rows, dtype=np.float32)
+            v=np.zeros(self.dim,dtype=np.float32)
+            for i,b in enumerate(str(text).encode()): v[i%self.dim]+=((b%31)+1)
+            if normalize_embeddings and np.linalg.norm(v): v/=np.linalg.norm(v)
+            out.append(v)
+        return np.asarray(out)
 
+class FakeConstructor:
+    def __init__(self): self.calls=0
+    def json(self,prompt):
+        self.calls+=1
+        return {"summary":"value-a.","kv":[{"entity":"subject-1","attribute":"status","value":"value-a"}],"event":[{"time":"2001-02-03","subject":"subject-1","event":"status value-a"}],"hq":["Which status has subject-1?"],"graph":[{"subject":"subject-1","relation":"has_status","object":"value-a"}]}
 
-class FakeLLM:
-    def __init__(self):
-        self.text_calls = 0
-        self.json_calls = 0
+class FakeSupport:
+    def score(self,claim,source): return 1.0 if "invalid-token" not in claim else 0.0
+class FakeQA:
+    def answerable(self,question,source): return "subject-1" in question
 
-    def text(self, prompt, *, purpose="unspecified"):
-        self.text_calls += 1
-        return "Alice moved to Boston."
+class FakeRunner:
+    reader_version="reader-test"; scorer_version="scorer-test"; prompt_version="prompt-test"; seed=0
+    def __init__(self): self.calls=0
+    def score(self,query,bodies):
+        self.calls+=1
+        gold=str(query.get("answer","")).casefold()
+        joined=" ".join(bodies).casefold()
+        return float(bool(gold) and gold in joined)
 
-    def json(self, prompt, *, purpose="unspecified"):
-        self.json_calls += 1
-        if "键值" in prompt:
-            return {
-                "items": [
-                    {"key": "Alice location", "value": "Alice moved to Boston"},
-                    {"key": "move date", "value": "8 May 2023"},
-                ]
-            }
-        if "可检索事件" in prompt:
-            return {
-                "items": [
-                    {"time": "2023-05-08", "event": "Alice moved to Boston"},
-                    {"time": "2023-05-08", "event": "Alice told Bob"},
-                ]
-            }
-        if "实体关系" in prompt:
-            return {
-                "relations": [
-                    {
-                        "subject": "Alice",
-                        "relation": "moved_to",
-                        "object": "Boston",
-                        "value": "Boston",
-                        "valid_from": "2023-05-08",
-                        "valid_to": None,
-                    }
-                ]
-            }
-        return {"answer": "Boston", "cites": [0]}
+class FakeValueModel:
+    def cheap(self,action,features):
+        return Estimate({"raw":0.2,"sum":0.1,"raw+kv":0.3,"raw+event":0.2,"raw+hq":0.1}.get(action,.0),0.01)
+    def full(self,action,features,raw_features):
+        means={"raw":0.2,"sum":0.15,"raw+kv":0.35,"raw+event":0.25,"raw+hq":0.1}
+        return Stage2Estimate(means[action],.01,.01)
+    def read_cost(self,action,features): return 0.0
 
-
-class FakeQG:
-    def generate(self, previous, text):
-        return GeneratedQueries(
-            ("Where did Alice move?", "What is the weather on Mars?"), -1.0
-        )
-
-
-class FakeReader:
-    def answer(self, question, payloads, current_date):
-        found = next(
-            (index for index, payload in enumerate(payloads) if "Boston" in payload),
-            None,
-        )
-        return ReaderAnswer(
-            "Boston" if found is not None else "unknown",
-            () if found is None else (found,),
-        )
-
-
-def small_conversation():
-    turns = [
-        {
-            "dia_id": "D1:1",
-            "speaker": "Alice",
-            "text": "I moved to Boston yesterday.",
-            "timestamp": "1:00 pm on 8 May, 2023",
-            "session": 1,
-        },
-        {
-            "dia_id": "D1:2",
-            "speaker": "Bob",
-            "text": "I like tea.",
-            "timestamp": "1:00 pm on 8 May, 2023",
-            "session": 1,
-        },
-        {
-            "dia_id": "D1:3",
-            "speaker": "Alice",
-            "text": "Boston is cold.",
-            "timestamp": "2:00 pm on 9 May, 2023",
-            "session": 2,
-        },
-    ]
-    return {
-        "turns": turns,
-        "qa": [
-            {
-                "question": "Where did Alice move?",
-                "answer": "Boston",
-                "evidence": ["D1:1"],
-                "category": 1,
-            },
-            {
-                "question": "What city is cold?",
-                "answer": "Boston",
-                "evidence": ["D1:3"],
-                "category": 1,
-            },
-        ],
-        "dia_to_index": {"D1:1": 0, "D1:2": 1, "D1:3": 2},
-        "speaker_a": "Alice",
-        "speaker_b": "Bob",
-        "conversation_id": "fake-conversation",
-    }
+class FakeResources:
+    def select_resources(self): return SelectResources(calls=1)
+    def action_resources(self,action,representation):
+        return ResourceLedger(commit=CommitResources(calls=1),index=IndexResources(body_bytes=len(representation.body),key_bytes=sum(map(len,representation.keys)),vector_count=len(representation.keys)),read=ReadResources())

@@ -1,38 +1,15 @@
-"""Read2Write 核心算法包。"""
+"""R2W v4 implementation for the current manuscript."""
 
-from .config import R2WConfig, default_config, load_config
-from .embedding import EmbeddingBackend
-from .llm import LLMClient
-from .representations import MetaBlock, Repr
-
-
-def train_pipeline(*args, **kwargs):
-    from .pipeline_train import train_pipeline as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def load_artifacts(*args, **kwargs):
-    from .pipeline_infer import load_artifacts as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def decide_turn(*args, **kwargs):
-    from .pipeline_infer import decide_turn as implementation
-
-    return implementation(*args, **kwargs)
-
+from .config import R2WConfig, CORE_ACTIONS, EXTENDED_ACTIONS
+from .actions import CandidateBundle, Representation, build_candidate_bundle, build_representation
+from .retrieval import ParentRRFIndex
+from .policy import Estimate, Stage2Estimate, early_reject, safe_stage2
+from .replay import replay_memory
+from .data import load_benchmark_conversations
 
 __all__ = [
-    "EmbeddingBackend",
-    "LLMClient",
-    "R2WConfig",
-    "MetaBlock",
-    "Repr",
-    "decide_turn",
-    "default_config",
-    "load_artifacts",
-    "load_config",
-    "train_pipeline",
+    "R2WConfig", "CORE_ACTIONS", "EXTENDED_ACTIONS", "CandidateBundle",
+    "Representation", "build_candidate_bundle", "build_representation",
+    "ParentRRFIndex", "Estimate", "Stage2Estimate", "early_reject",
+    "safe_stage2", "replay_memory", "load_benchmark_conversations",
 ]

@@ -1,24 +1,33 @@
-"""R2W 冻结成本口径。
-
-算法工件中的成本单位是可审计的 ``word_count``，不等同于任意模型的
-tokenizer token 或供应商账单 token。真实 API 用量另由 ``runtime_usage``
-记录，二者不得混写。
-"""
-
 from __future__ import annotations
+from dataclasses import dataclass, asdict
+from .config import R2WConfig
 
-import numpy as np
+@dataclass(frozen=True)
+class SelectResources:
+    calls: int=0; input_tokens:int=0; output_tokens:int=0; gpu_ms:float=0.; wall_ms:float=0.; cost:float=0.
+@dataclass(frozen=True)
+class CommitResources:
+    calls:int=0; gpu_ms:float=0.; wall_ms:float=0.; cost:float=0.
+@dataclass(frozen=True)
+class IndexResources:
+    body_bytes:int=0; key_bytes:int=0; vector_count:int=0; vector_bytes:int=0; retention_days:float=0.
+@dataclass(frozen=True)
+class ReadResources:
+    hit_probability:float=0.; expected_body_tokens:float=0.; retrieval_ms:float=0.; reader_ms:float=0.; cost:float=0.
+@dataclass(frozen=True)
+class ResourceLedger:
+    select:SelectResources=SelectResources(); commit:CommitResources=CommitResources(); index:IndexResources=IndexResources(); read:ReadResources=ReadResources()
+    def to_dict(self): return {"select":asdict(self.select),"commit":asdict(self.commit),"index":asdict(self.index),"read":asdict(self.read)}
 
-from .representations import Repr
-from .text import word_count
+def scalar_select(x:SelectResources, unit:str="cost")->float: return float(getattr(x,unit))
+def scalar_commit(x:CommitResources, unit:str="cost")->float: return float(getattr(x,unit))
+def scalar_index(x:IndexResources, unit:str="byte_day")->float:
+    if unit=="byte_day": return float((x.body_bytes+x.key_bytes)*max(x.retention_days,1.0))
+    if unit=="bytes": return float(x.body_bytes+x.key_bytes)
+    return float(getattr(x,unit))
+def scalar_read(x:ReadResources, unit:str="expected_body_tokens")->float: return float(getattr(x,unit))
 
-COST_UNIT = "word_count"
-
-
-def representation_costs(representation: Repr) -> np.ndarray:
-    """返回 [write, index, reader_payload] 的冻结三分量成本。"""
-    payload = float(word_count(representation.payload))
-    keys = float(sum(word_count(value) for value in representation.keys))
-    # raw 没有生成式草稿写入；其原始正文仍需进入索引并在命中时给 reader。
-    write = 0.0 if representation.arm == "raw" else payload + keys
-    return np.asarray((write, payload + keys, payload), dtype=np.float32)
+def post_selection_value(delta_e:float, ledger:ResourceLedger, cfg:R2WConfig)->float:
+    return float(delta_e - cfg.lambda_commit*scalar_commit(ledger.commit,cfg.commit_scalar)/cfg.H_Q - cfg.lambda_index*scalar_index(ledger.index,cfg.index_scalar)/cfg.H_Q - cfg.lambda_read*scalar_read(ledger.read,cfg.read_scalar))
+def enter_value(values:list[float], select:SelectResources, cfg:R2WConfig)->float:
+    return float(max([0.0,*values]) - cfg.lambda_select*scalar_select(select,cfg.select_scalar)/cfg.H_Q)
