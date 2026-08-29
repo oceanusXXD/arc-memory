@@ -15,8 +15,8 @@ from .config import R2WConfig
 from .costs import COST_UNIT, representation_costs
 from .representations import STRUCT_ACTIONS, attach_hypothetical_queries, build_representation
 from .retrieval import UnifiedIndex, representation_index_units
-from .teacher import ReaderAdapter, token_f1
-from .text import word_count
+from .teacher import ReaderAdapter, reader_current_date, token_f1
+from .text import tokenize, word_count
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class BaselineResult:
     fixed_action: str | None
     conversations: int
     qa_count: int
+    mean_normalized_exact_match: float
     mean_token_f1: float
     mean_evidence_recall_at_k: float
     mean_retrieved_turns: float
@@ -40,6 +41,13 @@ class BaselineResult:
 def _mean(values: list[float]) -> float:
     array = np.asarray(values, dtype=np.float64)
     return float(np.nanmean(array)) if len(array) else float("nan")
+
+
+def _normalized_exact_match(prediction: object, gold: object) -> float:
+    """按与 token-F1 相同的分词/小写规则计算可审计的严格正确率。"""
+    if gold is None:
+        return float("nan")
+    return float(tokenize(str(prediction)) == tokenize(str(gold)))
 
 
 def _fixed_representations(conversation: dict, action: str, constructor, qg, cfg: R2WConfig):
@@ -65,7 +73,7 @@ def evaluate_fixed_baseline(
     qg=None,
 ) -> BaselineResult:
     """评估一个固定写入表示；``raw`` 是正式 Naive RAG 基线。"""
-    f1, recall, retrieved_counts, reader_words = [], [], [], []
+    exact, f1, recall, retrieved_counts, reader_words = [], [], [], [], []
     write_words = index_words = 0.0
     qa_count = 0
     for conversation in conversations:
@@ -85,11 +93,12 @@ def evaluate_fixed_baseline(
             results = index.retrieve_turns(query["question"], cfg.retrieval_k)
             payloads = index.reader_payloads(results)
             answer = reader.answer(
-                query["question"], payloads, conversation["turns"][-1]["timestamp"]
+                query["question"], payloads, reader_current_date(conversation, query)
             )
             evidence = [conversation["dia_to_index"][value] for value in query["evidence"]]
             returned = {value.turn_index for value in results}
             f1.append(token_f1(answer.answer, query.get("answer")))
+            exact.append(_normalized_exact_match(answer.answer, query.get("answer")))
             recall.append(sum(value in returned for value in evidence) / max(len(evidence), 1))
             retrieved_counts.append(float(len(results)))
             reader_words.append(float(sum(word_count(value) for value in payloads)))
@@ -99,6 +108,7 @@ def evaluate_fixed_baseline(
         fixed_action=action,
         conversations=len(conversations),
         qa_count=qa_count,
+        mean_normalized_exact_match=_mean(exact),
         mean_token_f1=_mean(f1),
         mean_evidence_recall_at_k=_mean(recall),
         mean_retrieved_turns=_mean(retrieved_counts),
@@ -110,12 +120,15 @@ def evaluate_fixed_baseline(
 
 def evaluate_none_baseline(conversations: list[dict], reader: ReaderAdapter) -> BaselineResult:
     """无热记忆诊断线；它不是 Naive RAG。"""
-    f1, reader_words = [], []
+    exact, f1, reader_words = [], [], []
     qa_count = 0
     for conversation in conversations:
         for query in conversation["qa"]:
-            answer = reader.answer(query["question"], [], conversation["turns"][-1]["timestamp"])
+            answer = reader.answer(
+                query["question"], [], reader_current_date(conversation, query)
+            )
             f1.append(token_f1(answer.answer, query.get("answer")))
+            exact.append(_normalized_exact_match(answer.answer, query.get("answer")))
             reader_words.append(0.0)
             qa_count += 1
     return BaselineResult(
@@ -123,6 +136,7 @@ def evaluate_none_baseline(conversations: list[dict], reader: ReaderAdapter) -> 
         fixed_action=None,
         conversations=len(conversations),
         qa_count=qa_count,
+        mean_normalized_exact_match=_mean(exact),
         mean_token_f1=_mean(f1),
         mean_evidence_recall_at_k=0.0,
         mean_retrieved_turns=0.0,
@@ -134,14 +148,17 @@ def evaluate_none_baseline(conversations: list[dict], reader: ReaderAdapter) -> 
 
 def evaluate_full_context_baseline(conversations: list[dict], cfg: R2WConfig, reader: ReaderAdapter) -> BaselineResult:
     """完整历史直接给 reader 的长上下文参考线，不经过检索。"""
-    f1, reader_words, retrieved_counts = [], [], []
+    exact, f1, reader_words, retrieved_counts = [], [], [], []
     qa_count = 0
     for conversation in conversations:
         payloads = [build_representation(turn, "raw", None, cfg).payload for turn in conversation["turns"]]
         context_words = float(sum(word_count(value) for value in payloads))
         for query in conversation["qa"]:
-            answer = reader.answer(query["question"], payloads, conversation["turns"][-1]["timestamp"])
+            answer = reader.answer(
+                query["question"], payloads, reader_current_date(conversation, query)
+            )
             f1.append(token_f1(answer.answer, query.get("answer")))
+            exact.append(_normalized_exact_match(answer.answer, query.get("answer")))
             reader_words.append(context_words)
             retrieved_counts.append(float(len(payloads)))
             qa_count += 1
@@ -150,6 +167,7 @@ def evaluate_full_context_baseline(conversations: list[dict], cfg: R2WConfig, re
         fixed_action=None,
         conversations=len(conversations),
         qa_count=qa_count,
+        mean_normalized_exact_match=_mean(exact),
         mean_token_f1=_mean(f1),
         mean_evidence_recall_at_k=1.0,
         mean_retrieved_turns=_mean(retrieved_counts),

@@ -5,8 +5,86 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+
+
+ALIYUN_FAILOVER_MODELS = (
+    "qwen3.7-max-2026-06-08",
+    "glm-5.1",
+    "kimi-k3",
+    "deepseek-v4-flash-0731",
+    "glm-5.2",
+    "kimi-k2.7-code",
+    "deepseek-v4-pro-0813",
+    "qwen3.7-plus-2026-05-26",
+    "qwen3.8-2.4t-a95b",
+    "qwen3.8-max",
+    "qwen3.7-flash",
+)
+
+
+def _load_env_file(path: Path) -> None:
+    """读取 FutureMem 同格式的简单 shell .env，不打印值。"""
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name or not name.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        try:
+            parsed = shlex.split(value, comments=True, posix=True)
+            value = parsed[0] if parsed else ""
+        except ValueError as exc:
+            raise ValueError(f"环境文件 {path} 中 {name} 的引号不合法。") from exc
+        # FutureMem 的 .env.rag_futuremem10 使用 "$LLM_BASE_URL"；在已加载
+        # 的基础 .env 上执行 shell 风格变量展开。
+        value = os.path.expandvars(value)
+        os.environ[name] = value
+
+
+def _load_runtime_env() -> None:
+    root = Path(__file__).resolve().parents[1]
+    _load_env_file(root / ".env")
+    profile = os.environ.get("R2W_ENV_FILE", "").strip()
+    if profile:
+        profile_path = Path(profile)
+        if not profile_path.is_absolute():
+            profile_path = root / profile_path
+        _load_env_file(profile_path)
+
+
+_load_runtime_env()
+
+
+def _env_int(name: str, fallback: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return fallback
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数。") from exc
+
+
+def _env_float(name: str, fallback: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return fallback
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数值。") from exc
 
 
 @dataclass(slots=True)
@@ -32,6 +110,8 @@ class R2WConfig:
     llm_temperature: float = 0.0
     llm_max_tokens: int = 512
     llm_api_timeout: float = 600.0
+    llm_reasoning_effort: str = ""
+    llm_failover_models: tuple[str, ...] = ALIYUN_FAILOVER_MODELS
 
     # API 和本地结构化构建器都实现同一协议；本次不在训练/测试中调用真实后端。
     constructor_backend: str = "api"
@@ -141,7 +221,30 @@ class R2WConfig:
 
 
 def default_config(**overrides) -> R2WConfig:
-    return R2WConfig(**overrides)
+    runtime = {
+        "embedding_model": os.environ.get("EMBEDDING_MODEL", "qwen3.7-text-embedding"),
+        "embedding_base_url": os.environ.get(
+            "EMBEDDING_BASE_URL",
+            "https://ws-r47ew96n372cv89s.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        ),
+        "embedding_device": os.environ.get("EMBEDDING_DEVICE", "cpu"),
+        "embedding_api_batch_size": _env_int("EMBEDDING_BATCH_SIZE", 8),
+        "embedding_api_timeout": _env_float("EMBEDDING_API_TIMEOUT", 600.0),
+        "llm_model": os.environ.get("LLM_MODEL", "kimi-k3"),
+        "llm_base_url": os.environ.get(
+            "LLM_BASE_URL",
+            "https://ws-r47ew96n372cv89s.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        ),
+        "llm_api_timeout": _env_float("LLM_API_TIMEOUT", 600.0),
+        "llm_reasoning_effort": os.environ.get("LLM_REASONING_EFFORT", "").strip(),
+    }
+    failover = os.environ.get("LLM_FAILOVER_MODELS", "").strip()
+    if failover:
+        runtime["llm_failover_models"] = tuple(
+            value.strip() for value in failover.split(",") if value.strip()
+        )
+    runtime.update(overrides)
+    return R2WConfig(**runtime)
 
 
 def load_config(path: str | Path) -> R2WConfig:

@@ -1,0 +1,471 @@
+{
+  "schema_version": "manual-query-oracle-v1",
+  "notes": [
+    "这些 profile 是人为定义的诊断 value，不是 reader/API 测得的 causal effect。",
+    "每条 example 使用真实 LoCoMo query 和真实 evidence turn；answer 与 category 不进入特征。",
+    "raw/sum 表示是否压缩，kv/event/graph/hq 表示人为认为最适合该 query 的检索 key 类型。"
+  ],
+  "value_profiles": {
+    "temporal_event_raw": {
+      "description": "精确时间问题需要保留原文细节，event key 的价值最高。",
+      "values": {
+        "raw": 0.45,
+        "raw+kv": 0.40,
+        "raw+event": 1.00,
+        "raw+graph": 0.35,
+        "raw+hq": 0.55,
+        "sum": 0.20,
+        "sum+kv": 0.20,
+        "sum+event": 0.65,
+        "sum+graph": 0.15,
+        "sum+hq": 0.30
+      }
+    },
+    "entity_kv_raw": {
+      "description": "单实体属性或短清单问题适合 KV，同时保留原始 payload。",
+      "values": {
+        "raw": 0.55,
+        "raw+kv": 1.00,
+        "raw+event": 0.30,
+        "raw+graph": 0.60,
+        "raw+hq": 0.65,
+        "sum": 0.35,
+        "sum+kv": 0.72,
+        "sum+event": 0.20,
+        "sum+graph": 0.45,
+        "sum+hq": 0.40
+      }
+    },
+    "relation_graph_raw": {
+      "description": "跨人物、原因或关系问题适合 graph，细节量适中时保留 raw。",
+      "values": {
+        "raw": 0.40,
+        "raw+kv": 0.65,
+        "raw+event": 0.30,
+        "raw+graph": 1.00,
+        "raw+hq": 0.55,
+        "sum": 0.25,
+        "sum+kv": 0.45,
+        "sum+event": 0.25,
+        "sum+graph": 0.75,
+        "sum+hq": 0.35
+      }
+    },
+    "broad_graph_compressed": {
+      "description": "多 evidence 的关系归纳问题适合压缩 payload 和 graph key。",
+      "values": {
+        "raw": 0.20,
+        "raw+kv": 0.35,
+        "raw+event": 0.25,
+        "raw+graph": 0.65,
+        "raw+hq": 0.35,
+        "sum": 0.45,
+        "sum+kv": 0.60,
+        "sum+event": 0.40,
+        "sum+graph": 1.00,
+        "sum+hq": 0.50
+      }
+    },
+    "inference_hq_raw": {
+      "description": "likely/would/does 等推断式 query 适合 hypothetical-query key。",
+      "values": {
+        "raw": 0.40,
+        "raw+kv": 0.35,
+        "raw+event": 0.25,
+        "raw+graph": 0.55,
+        "raw+hq": 1.00,
+        "sum": 0.25,
+        "sum+kv": 0.30,
+        "sum+event": 0.20,
+        "sum+graph": 0.45,
+        "sum+hq": 0.72
+      }
+    },
+    "broad_kv_compressed": {
+      "description": "多项事实清单适合压缩 payload 和 KV key。",
+      "values": {
+        "raw": 0.25,
+        "raw+kv": 0.65,
+        "raw+event": 0.25,
+        "raw+graph": 0.50,
+        "raw+hq": 0.35,
+        "sum": 0.45,
+        "sum+kv": 1.00,
+        "sum+event": 0.35,
+        "sum+graph": 0.70,
+        "sum+hq": 0.50
+      }
+    }
+  },
+  "examples": [
+    {
+      "conversation_id": "conv-26",
+      "question": "When did Caroline go to the LGBTQ support group?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-26",
+      "question": "When did Melanie paint a sunrise?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-26",
+      "question": "What fields would Caroline be likely to pursue in her educaton?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+    {
+      "conversation_id": "conv-26",
+      "question": "What did Caroline research?",
+      "split": "train",
+      "profile": "entity_kv_raw"
+    },
+    {
+      "conversation_id": "conv-26",
+      "question": "What is Caroline's identity?",
+      "split": "train",
+      "profile": "entity_kv_raw"
+    },
+    {
+      "conversation_id": "conv-26",
+      "question": "When did Melanie run a charity race?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+
+    {
+      "conversation_id": "conv-30",
+      "question": "When Jon has lost his job as a banker?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-30",
+      "question": "When Gina has lost her job at Door Dash?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-30",
+      "question": "How do Jon and Gina both like to destress?",
+      "split": "train",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-30",
+      "question": "What do Jon and Gina both have in common?",
+      "split": "train",
+      "profile": "broad_graph_compressed"
+    },
+    {
+      "conversation_id": "conv-30",
+      "question": "Why did Jon decide to start his dance studio?",
+      "split": "train",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-30",
+      "question": "What Jon thinks the ideal dance studio should look like?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+
+    {
+      "conversation_id": "conv-41",
+      "question": "Who did Maria have dinner with on May 3, 2023?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-41",
+      "question": "When did Maria donate her car?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-41",
+      "question": "What martial arts has John done?",
+      "split": "train",
+      "profile": "entity_kv_raw"
+    },
+    {
+      "conversation_id": "conv-41",
+      "question": "What type of volunteering have John and Maria both done?",
+      "split": "train",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-41",
+      "question": "When did John join the online support group?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-41",
+      "question": "When did Maria go to the beach?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+
+    {
+      "conversation_id": "conv-42",
+      "question": "Is it likely that Nate has friends besides Joanna?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+    {
+      "conversation_id": "conv-42",
+      "question": "What kind of interests do Joanna and Nate share?",
+      "split": "train",
+      "profile": "broad_graph_compressed"
+    },
+    {
+      "conversation_id": "conv-42",
+      "question": "When did Joanna first watch \"Eternal Sunshine of the Spotless Mind?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-42",
+      "question": "When did Nate win his first video game tournament?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-42",
+      "question": "What pets wouldn't cause any discomfort to Joanna?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+    {
+      "conversation_id": "conv-42",
+      "question": "What are Joanna's hobbies?",
+      "split": "train",
+      "profile": "entity_kv_raw"
+    },
+
+    {
+      "conversation_id": "conv-43",
+      "question": "what are John's goals with regards to his basketball career?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-43",
+      "question": "What are John's goals for his career that are not related to his basketball skills?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-43",
+      "question": "What items does John collect?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-43",
+      "question": "Would Tim enjoy reading books by C. S. Lewis or John Greene?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+    {
+      "conversation_id": "conv-43",
+      "question": "What books has Tim read?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-43",
+      "question": "Based on Tim's collections, what is a shop that he would enjoy visiting in New York city?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+
+    {
+      "conversation_id": "conv-44",
+      "question": "Which year did Audrey adopt the first three of her dogs?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-44",
+      "question": "When did Andrew start his new job as a financial analyst?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-44",
+      "question": "What kind of indoor activities has Andrew pursued with his girlfriend?",
+      "split": "train",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-44",
+      "question": "What kind of places have Andrew and his girlfriend checked out around the city?",
+      "split": "train",
+      "profile": "broad_graph_compressed"
+    },
+    {
+      "conversation_id": "conv-44",
+      "question": "When did Audrey make muffins for herself?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-44",
+      "question": "When did Audrey see a hummingbird?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+
+    {
+      "conversation_id": "conv-47",
+      "question": "What are John's suspected health problems?",
+      "split": "train",
+      "profile": "inference_hq_raw"
+    },
+    {
+      "conversation_id": "conv-47",
+      "question": "Which recreational activity was James pursuing on March 16, 2022?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-47",
+      "question": "Which places or events have John and James planned to meet at?",
+      "split": "train",
+      "profile": "broad_graph_compressed"
+    },
+    {
+      "conversation_id": "conv-47",
+      "question": "Do both James and John have pets?",
+      "split": "train",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-47",
+      "question": "When did John resume playing drums in his adulthood?",
+      "split": "train",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-47",
+      "question": "What are John and James' favorite games?",
+      "split": "train",
+      "profile": "relation_graph_raw"
+    },
+
+    {
+      "conversation_id": "conv-48",
+      "question": "What kind of project was Jolene working on in the beginning of January 2023?",
+      "split": "test",
+      "profile": "entity_kv_raw"
+    },
+    {
+      "conversation_id": "conv-48",
+      "question": "Which of Deborah`s family and friends have passed away?",
+      "split": "test",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-48",
+      "question": "When did Deborah`s mother pass away?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-48",
+      "question": "When did Jolene`s mother pass away?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-48",
+      "question": "When did Jolene's mom gift her a pendant?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-48",
+      "question": "In what country did Jolene's mother buy her the pendant?",
+      "split": "test",
+      "profile": "entity_kv_raw"
+    },
+
+    {
+      "conversation_id": "conv-49",
+      "question": "What kind of car does Evan drive?",
+      "split": "test",
+      "profile": "entity_kv_raw"
+    },
+    {
+      "conversation_id": "conv-49",
+      "question": "What kinds of things did Evan have broken?",
+      "split": "test",
+      "profile": "broad_graph_compressed"
+    },
+    {
+      "conversation_id": "conv-49",
+      "question": "Where has Evan been on roadtrips with his family?",
+      "split": "test",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-49",
+      "question": "How many Prius has Evan owned?",
+      "split": "test",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-49",
+      "question": "Which hobby did Sam take up in May 2023?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-49",
+      "question": "Which country was Evan visiting in May 2023?",
+      "split": "test",
+      "profile": "inference_hq_raw"
+    },
+
+    {
+      "conversation_id": "conv-50",
+      "question": "When did Calvin first travel to Tokyo?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-50",
+      "question": "What items did Calvin buy in March 2023?",
+      "split": "test",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-50",
+      "question": "When did Dave see Aerosmith perform live?",
+      "split": "test",
+      "profile": "temporal_event_raw"
+    },
+    {
+      "conversation_id": "conv-50",
+      "question": "Which bands has Dave enjoyed listening to?",
+      "split": "test",
+      "profile": "broad_kv_compressed"
+    },
+    {
+      "conversation_id": "conv-50",
+      "question": "Which country do Calvin and Dave want to meet in?",
+      "split": "test",
+      "profile": "relation_graph_raw"
+    },
+    {
+      "conversation_id": "conv-50",
+      "question": "What are Dave's dreams?",
+      "split": "test",
+      "profile": "broad_kv_compressed"
+    }
+  ]
+}

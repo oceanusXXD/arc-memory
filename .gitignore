@@ -13,3 +13,8 @@ data/
 code/artifacts/
 code/reports/
 code/configs/
+
+# Local API credentials imported from the approved FutureMem runtime profile.
+code/.env
+code/.env.*
+!code/.env.example

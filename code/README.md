@@ -19,7 +19,9 @@ sum | sum+kv | sum+event | sum+graph | sum+hq | none
 ## 运行前提
 
 - Python 3.10 或更高版本。
-- LoCoMo 文件，例如 `../data/LoCoMo/data/locomo10.json`。
+- LoCoMo 文件，例如 `../data/LoCoMo/data/locomo10.json`。也支持 LongMemEval 的原始
+  `longmemeval_s_cleaned.json` 或其 record 子集：每个 haystack session 会成为一个
+  R2W memory，`answer_session_ids` 严格映射到 evidence。
 - 真实训练与基线 QA 需要 `LLM_API_KEY`；远程 embedding 需要 `EMBEDDING_API_KEY`，未设置时使用 `LLM_API_KEY`。
 - QG、NER、本地构建器和 NLI 模型由 Hugging Face 下载；首次运行需要网络和磁盘空间。
 
@@ -36,6 +38,13 @@ python -m pip install -r requirements.txt
 
 $env:LLM_API_KEY = "<your-llm-key>"
 $env:EMBEDDING_API_KEY = "<your-embedding-key>" # 若相同可省略
+```
+
+若已从 FutureMem 导入本地 `code/.env`，运行时会自动读取它（该文件被 git 忽略）。
+使用其中的阿里 embedding profile 时，在启动 Python 前设置：
+
+```powershell
+$env:R2W_ENV_FILE = '.env.rag_futuremem10'
 ```
 
 `scripts/setup.sh` 与 `scripts/run_train.sh` 供 Bash 使用；Windows 请使用以上命令。
@@ -113,6 +122,24 @@ python -m r2w.pipeline_baselines `
 ```
 
 报告包含端到端 `token_f1`、evidence recall@k、平均 reader 上下文大小、固定写入/索引量及实际 API token 账本。所有固定臂共用同一检索和 reader。
+`mean_normalized_exact_match` 是和 token-F1 使用同一分词规则的严格准确率；它不替代
+LongMemEval 需要外部 judge 的官方 accuracy。
+
+LongMemEval 真实 API smoke test（这里的 `sum` 是 R2W 的固定压缩候选，完整 R2W
+策略评测需要先以训练 split 训练 v3 artifact）：
+
+```powershell
+$env:R2W_ENV_FILE = '.env.rag_futuremem10'
+$env:R2W_EMBEDDING_CACHE = 'reports/longmemeval-r2w-embeddings.npz'
+python -m r2w.pipeline_baselines `
+  --data ../futuremem/external/LongMemEval/data/longmemeval_s_cleaned.json `
+  --actions raw,sum --without-none --without-full-context `
+  --limit-conversations 4 `
+  --out reports/longmemeval-api-baselines.json
+```
+
+`R2W_EMBEDDING_CACHE` 以表示文本的 SHA-256 键持久化向量，只有文本完全相同才复用。
+FutureMem 以 `episode_id::memory_id` 作为键的缓存不能直接用于 R2W 的带元数据表示。
 
 ## 在线写入
 

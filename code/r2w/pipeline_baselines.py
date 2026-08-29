@@ -71,6 +71,11 @@ def evaluate_baselines(
         "cost_unit": "word_count",
         "results": results,
         "provider_usage": provider_usage_payload(llm=llm, embedding=embedder),
+        "embedding_cache": (
+            embedder.cache_statistics()
+            if hasattr(embedder, "cache_statistics")
+            else {"unit": "unavailable"}
+        ),
     }
 
 
@@ -86,12 +91,22 @@ def main() -> None:
     )
     parser.add_argument("--without-none", action="store_true")
     parser.add_argument("--without-full-context", action="store_true")
+    parser.add_argument(
+        "--limit-conversations",
+        type=int,
+        help="仅评测输入文件前 N 个 conversation；用于真实 API smoke test。",
+    )
     arguments = parser.parse_args()
     actions = [value.strip() for value in arguments.actions.split(",") if value.strip()]
     cfg = load_config(arguments.config) if arguments.config else default_config()
+    conversations = load_training_data(arguments.data)
+    if arguments.limit_conversations is not None:
+        if arguments.limit_conversations < 1:
+            parser.error("--limit-conversations 必须为正数。")
+        conversations = conversations[: arguments.limit_conversations]
     result = evaluate_baselines(
         cfg,
-        load_training_data(arguments.data),
+        conversations,
         actions,
         include_none=not arguments.without_none,
         include_full_context=not arguments.without_full_context,

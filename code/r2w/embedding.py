@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 
@@ -29,6 +31,74 @@ class EmbeddingBackend:
         )
         self.model = None
         self.usage = UsageLedger()
+        self._text_cache: dict[str, np.ndarray] = {}
+        configured_cache = os.environ.get("R2W_EMBEDDING_CACHE", "").strip()
+        self.cache_path = Path(configured_cache) if configured_cache else None
+        self.cache_hits = 0
+        self.cache_misses = 0
+        if self.cache_path is not None and self.cache_path.exists():
+            self._load_text_cache(self.cache_path)
+
+    @staticmethod
+    def _digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _load_text_cache(self, path: Path) -> None:
+        """加载 R2W 自己的文本哈希缓存，拒绝 id-keyed 的外部缓存。"""
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                if set(data.files) != {"schema", "keys", "vectors"}:
+                    raise ValueError("字段必须是 schema/keys/vectors")
+                schema = str(np.asarray(data["schema"]).item())
+                keys = [str(value) for value in data["keys"]]
+                vectors = np.asarray(data["vectors"], dtype=np.float32)
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError(f"R2W embedding 缓存无法读取: {path}") from exc
+        if schema != "r2w-text-sha256-v1":
+            raise ValueError(
+                "R2W embedding 缓存版本不匹配；FutureMem 的 episode::memory_id 缓存"
+                "不能在未验证表示文本相同的情况下直接复用。"
+            )
+        if (
+            vectors.ndim != 2
+            or vectors.shape != (len(keys), self.cfg.embedding_dim)
+            or len(keys) != len(set(keys))
+            or any(len(key) != 64 for key in keys)
+            or not np.isfinite(vectors).all()
+            or np.any(np.linalg.norm(vectors, axis=1) == 0)
+        ):
+            raise ValueError("R2W embedding 缓存维度、键或向量无效。")
+        self._text_cache = {
+            key: vector / np.linalg.norm(vector)
+            for key, vector in zip(keys, vectors, strict=True)
+        }
+
+    def _save_text_cache(self) -> None:
+        if self.cache_path is None or not self._text_cache:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        keys = sorted(self._text_cache)
+        vectors = np.asarray([self._text_cache[key] for key in keys], dtype=np.float32)
+        temporary = self.cache_path.with_name(
+            f"{self.cache_path.stem}.tmp{self.cache_path.suffix}"
+        )
+        with temporary.open("wb") as handle:
+            np.savez_compressed(
+                handle,
+                schema=np.asarray("r2w-text-sha256-v1"),
+                keys=np.asarray(keys),
+                vectors=vectors,
+            )
+        temporary.replace(self.cache_path)
+
+    def cache_statistics(self) -> dict:
+        return {
+            "schema": "r2w-text-sha256-v1",
+            "path": str(self.cache_path) if self.cache_path is not None else None,
+            "entries": len(self._text_cache),
+            "hits": self.cache_hits,
+            "misses": self.cache_misses,
+        }
 
     def encode(self, texts, normalize_embeddings: bool = True, batch_size: int = 128):
         texts = list(texts)
@@ -36,6 +106,22 @@ class EmbeddingBackend:
             raise ValueError("embedding 输入不能为空。")
         if not normalize_embeddings:
             raise ValueError("R2W FINAL 固定使用 L2 归一化 embedding。")
+        digests = [self._digest(text) for text in texts]
+        missing = {
+            digest: text
+            for text, digest in zip(texts, digests, strict=True)
+            if digest not in self._text_cache
+        }
+        self.cache_hits += len(texts) - sum(
+            digest not in self._text_cache for digest in digests
+        )
+        self.cache_misses += sum(digest not in self._text_cache for digest in digests)
+        if not missing:
+            return np.asarray(
+                [self._text_cache[digest] for digest in digests], dtype=np.float32
+            )
+        missing_digests = list(missing)
+        missing_texts = list(missing.values())
         if self.base_url:
             if not self.api_key:
                 raise RuntimeError(
@@ -44,8 +130,8 @@ class EmbeddingBackend:
             size = min(batch_size, self.cfg.embedding_api_batch_size)
             vectors = np.concatenate(
                 [
-                    self._api_encode(texts[start : start + size])
-                    for start in range(0, len(texts), size)
+                    self._api_encode(missing_texts[start : start + size])
+                    for start in range(0, len(missing_texts), size)
                 ],
                 axis=0,
             )
@@ -58,7 +144,7 @@ class EmbeddingBackend:
                 )
             vectors = np.asarray(
                 self.model.encode(
-                    texts,
+                    missing_texts,
                     batch_size=batch_size,
                     convert_to_numpy=True,
                     normalize_embeddings=True,
@@ -67,7 +153,7 @@ class EmbeddingBackend:
                 dtype=np.float32,
             )
         if (
-            vectors.shape != (len(texts), self.cfg.embedding_dim)
+            vectors.shape != (len(missing_texts), self.cfg.embedding_dim)
             or not np.isfinite(vectors).all()
         ):
             raise RuntimeError(
@@ -76,7 +162,13 @@ class EmbeddingBackend:
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         if np.any(norms == 0):
             raise RuntimeError("embedding API 返回零向量。")
-        return (vectors / norms).astype(np.float32)
+        vectors = (vectors / norms).astype(np.float32)
+        for digest, vector in zip(missing_digests, vectors, strict=True):
+            self._text_cache[digest] = vector
+        self._save_text_cache()
+        return np.asarray(
+            [self._text_cache[digest] for digest in digests], dtype=np.float32
+        )
 
     def _api_encode(self, texts: list[str]) -> np.ndarray:
         endpoint = "/embeddings" if self.base_url.endswith("/v1") else "/v1/embeddings"

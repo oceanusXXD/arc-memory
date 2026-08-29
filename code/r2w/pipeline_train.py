@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import joblib
@@ -90,12 +91,110 @@ def _locomo_conversation(raw: dict) -> dict:
     })
 
 
+def _longmemeval_datetime(value: object, field: str) -> str:
+    """将 LongMemEval 的唯一时间格式转为 R2W 的绝对日期锚点。"""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"LongMemEval {field} 必须是非空时间字符串。")
+    try:
+        return datetime.strptime(value, "%Y/%m/%d (%a) %H:%M").strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"LongMemEval {field} 不是当前数据集使用的 YYYY/MM/DD (Day) HH:MM 格式。"
+        ) from exc
+
+
+def _longmemeval_conversation(raw: dict) -> dict:
+    """将一个 LongMemEval QA record 转为一个 R2W conversation。
+
+    LongMemEval 的可检索原子是 session，而不是 LoCoMo 的单条 ``dia_id``。
+    因此每个 session 成为一个 R2W turn，内容拼接规则与 FutureMem 的
+    ``LongMemEvalBenchmark.convert`` 完全一致；``answer_session_ids`` 直接
+    映射为 evidence。问题类型只作为 QA 审计字段保留，不进入写时特征。
+    """
+    question_id = raw.get("question_id")
+    if not isinstance(question_id, str) or not question_id.strip():
+        raise ValueError("LongMemEval question_id 必须是非空字符串。")
+    sessions = raw.get("haystack_sessions")
+    session_ids = raw.get("haystack_session_ids")
+    dates = raw.get("haystack_dates")
+    if not isinstance(sessions, list) or not isinstance(session_ids, list) or not isinstance(dates, list):
+        raise ValueError("LongMemEval 必须包含 haystack_sessions/session_ids/dates 数组。")
+    if not sessions or len(sessions) != len(session_ids) or len(sessions) != len(dates):
+        raise ValueError("LongMemEval session、session_id 与 date 数量必须相同且非空。")
+    turns = []
+    for index, (session, session_id, date) in enumerate(
+        zip(sessions, session_ids, dates, strict=True), start=1
+    ):
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("LongMemEval haystack_session_ids 必须是非空字符串。")
+        if not isinstance(session, list) or not session:
+            raise ValueError("LongMemEval 的每个 haystack session 必须是非空 turn 数组。")
+        lines = []
+        for dialog_turn in session:
+            if not isinstance(dialog_turn, dict):
+                raise ValueError("LongMemEval session turn 必须是 object。")
+            role, content = dialog_turn.get("role"), dialog_turn.get("content")
+            if not isinstance(role, str) or not isinstance(content, str) or not content.strip():
+                raise ValueError("LongMemEval session turn 必须包含非空 role 与 content。")
+            lines.append(f"{role}: {content}")
+        turns.append(
+            {
+                "dia_id": session_id,
+                # 原始 schema 没有 session 级单一说话人；显式标识这个事实，
+                # 而不从 QA 或内容猜测作者。
+                "speaker": "session",
+                "text": "\n".join(lines),
+                "timestamp": _longmemeval_datetime(date, "haystack_dates"),
+                "session": index,
+            }
+        )
+    evidence = raw.get("answer_session_ids")
+    if not isinstance(evidence, list):
+        raise ValueError("LongMemEval answer_session_ids 必须是数组。")
+    question = raw.get("question")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("LongMemEval question 必须是非空字符串。")
+    return _normalise_conversation(
+        {
+            "turns": turns,
+            "qa": [
+                {
+                    "id": question_id,
+                    "question": question,
+                    "answer": raw.get("answer"),
+                    "evidence": evidence,
+                    "timestamp": _longmemeval_datetime(
+                        raw.get("question_date"), "question_date"
+                    ),
+                    # 仅供离线报告/官方评测对齐；FeatureBuilder 不读取它。
+                    "category": raw.get("question_type"),
+                }
+            ],
+            "speaker_a": "session_a",
+            "speaker_b": "session_b",
+            "conversation_id": question_id,
+        }
+    )
+
+
 def load_training_data(path: str | Path) -> list[dict]:
     with Path(path).open(encoding="utf-8") as handle:
         values = json.load(handle)
     if not isinstance(values, list):
         raise TypeError("训练文件根节点必须是对话数组。")
-    return [_locomo_conversation(value) if "conversation" in value else _normalise_conversation(value) for value in values]
+    conversations = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise TypeError("训练文件中的每一项必须是 object。")
+        if "conversation" in value:
+            conversations.append(_locomo_conversation(value))
+        elif "haystack_sessions" in value:
+            conversations.append(_longmemeval_conversation(value))
+        else:
+            conversations.append(_normalise_conversation(value))
+    return conversations
 
 
 def _split_conversations(conversations: list[dict], seed: int) -> tuple[list[dict], list[dict], list[dict]]:

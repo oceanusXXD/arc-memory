@@ -44,6 +44,17 @@ class ReaderAdapter(Protocol):
     def answer(self, question: str, payloads: list[str], current_date: str) -> ReaderAnswer: ...
 
 
+def reader_current_date(conversation: dict, query: dict) -> str:
+    """提供 QA 时点；LoCoMo 旧输入缺失时保持末 turn 的原有语义。"""
+    timestamp = query.get("timestamp")
+    if isinstance(timestamp, str) and timestamp.strip():
+        return timestamp
+    turns = conversation.get("turns") or []
+    if not turns or not isinstance(turns[-1].get("timestamp"), str):
+        raise ValueError("reader 缺少 QA timestamp 和对话末 turn timestamp。")
+    return turns[-1]["timestamp"]
+
+
 class LLMReaderAdapter:
     """冻结 JSON reader；仅用于离线反事实结局。"""
 
@@ -137,7 +148,7 @@ def _snapshot(index: UnifiedIndex, conversation: dict, query_index: int, target:
         return float("nan"), rank, float(coverage)
     top = results[: cfg.retrieval_k]
     answer = reader.answer(
-        query["question"], index.reader_payloads(top), conversation["turns"][-1]["timestamp"]
+        query["question"], index.reader_payloads(top), reader_current_date(conversation, query)
     )
     return token_f1(answer.answer, query.get("answer")), rank, float(coverage)
 
@@ -165,7 +176,11 @@ def run_uniform_measure(conversation: dict, embedder, constructor, qg, cfg: R2WC
                 for value in evidence
             ) / max(len(evidence), 1)
             if reader is not None:
-                answer = reader.answer(query["question"], index.reader_payloads(results[: cfg.retrieval_k]), conversation["turns"][-1]["timestamp"])
+                answer = reader.answer(
+                    query["question"],
+                    index.reader_payloads(results[: cfg.retrieval_k]),
+                    reader_current_date(conversation, query),
+                )
                 action_qa[q] = token_f1(answer.answer, query.get("answer"))
         coverage[action], ranks[action], qa[action] = action_coverage, action_ranks, action_qa
     return UniformMeasure(catalog, coverage, ranks, qa)

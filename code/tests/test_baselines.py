@@ -24,6 +24,7 @@ class BaselineTests(unittest.TestCase):
         none = evaluate_none_baseline(conversations, FakeReader())
         full = evaluate_full_context_baseline(conversations, cfg, FakeReader())
         self.assertEqual(raw.name, "always_raw_naive_rag")
+        self.assertEqual(raw.mean_normalized_exact_match, 1.0)
         self.assertEqual(raw.total_write_words, 0.0)
         self.assertGreater(raw.total_index_words, 0.0)
         self.assertGreater(summary.total_write_words, 0.0)
