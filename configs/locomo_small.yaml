@@ -1,0 +1,22 @@
+# Small, real-LoCoMo smoke experiment.  The source corpus is unchanged; only
+# the three conversations below are materialized into the retrieval cache.
+run_id: locomo_small
+paths:
+  raw_data: data/LoCoMo/data/locomo10.json
+  split_manifest: data/splits/locomo_small_group_split.json
+  processed_dir: data/processed
+  cache_dir: data/cache/locomo_small
+  models_dir: models
+  runs_dir: runs
+splits:
+  train: [conv-26]
+  dev: [conv-30]
+  final: [conv-49]
+experiment_groups:
+  D_seed: [conv-26]
+  D_value: [conv-30]
+  D_dev: [conv-49]
+  D_cal: [conv-41]
+  D_eval: [conv-42]
+selector:
+  checkpoint: models/arc_selector_small.pt

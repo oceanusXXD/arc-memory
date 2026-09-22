@@ -1,9 +1,0 @@
-numpy>=1.24,<2
-lightgbm>=4.5,<5
-scikit-learn>=1.4,<2
-# LocalStructuredConstructor 需要 PyTorch；GBM 决策主链不依赖 torch。
-torch>=2.0
-sentence-transformers>=3.0,<6
-transformers>=4.40,<5
-sentencepiece>=0.2
-joblib>=1.3

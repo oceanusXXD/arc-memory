@@ -1,0 +1,9 @@
+numpy>=1.24
+PyYAML>=6.0
+tqdm>=4.66
+
+# Algorithm training and core algorithm tests.
+torch>=2.1
+rank-bm25>=0.2.2
+transformers>=4.45
+sentence-transformers>=3.0
