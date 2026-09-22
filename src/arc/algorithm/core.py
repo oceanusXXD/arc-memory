@@ -145,18 +145,23 @@ def compile_domain(
     domain: Iterable[Iterable[int]],
     cost: Callable[[Iterable[int]], int],
     evaluate: Callable[[frozenset[int]], str],
-    limit: int = 16,
+    limit: int | None = None,
 ) -> dict[frozenset[int], str]:
-    """Evaluate Full first, followed by the global exact-cost candidate order."""
+    """Evaluate Full first, followed by the global exact-cost candidate order.
+
+    The formal compiler evaluates the complete finite domain. ``limit`` is an
+    explicit pilot cap; callers must inspect the resulting completeness flag
+    before using a capped run as a training archive.
+    """
     universe = frozenset(evidence)
-    if type(limit) is not int or not 1 <= limit <= 16:
-        raise ValueError("limit must be an integer between 1 and 16")
+    if limit is not None and (type(limit) is not int or not 1 <= limit <= 16):
+        raise ValueError("limit must be None or an integer between 1 and 16")
     ordered = sorted({frozenset(item) for item in domain}, key=lambda item: (cost(item), canonical(item)))
     if universe not in ordered:
         raise ValueError("domain must include full E")
     records: dict[frozenset[int], str] = {}
     for candidate in (universe, *(item for item in ordered if item != universe)):
-        if len(records) >= limit:
+        if limit is not None and len(records) >= limit:
             break
         status = evaluate(candidate)
         if status not in STATUSES:
@@ -264,9 +269,9 @@ def sequence_risk(
         raise ValueError("positive budget and nonempty archive required")
     if any(not isfinite(float(value)) for value in logps.values()):
         raise ValueError("finite log probabilities required")
-    values = {frozenset(item): cost(item) for item in logps}
-    if any(not 0 <= value <= budget for value in values.values()):
-        raise ValueError("terminal cost outside budget")
+    values = {frozenset(item): float(cost(item)) for item in logps}
+    if any(not isfinite(value) or value < 0 for value in values.values()):
+        raise ValueError("terminal lifecycle cost must be finite and nonnegative")
     log_mass = logsumexp(logps.values())
     if log_mass > 1e-8:
         raise ValueError("terminal probability mass exceeds one")

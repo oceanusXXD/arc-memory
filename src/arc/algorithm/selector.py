@@ -432,7 +432,8 @@ def _structured_solutions(row: Mapping[str, Any], budget_row: Mapping[str, Any])
     for value in values or []:
         if isinstance(value, Mapping):
             item = solution_record(value.get("architecture", "Flat"), value.get("source_ids") or value.get("sources") or [],
-                                   cost=value.get("cost"), status=value.get("status"), utility=value.get("utility"))
+                                   cost=value.get("cost"), lifecycle_cost=value.get("lifecycle_cost"),
+                                   status=value.get("status"), utility=value.get("utility"))
         else:
             item = solution_record("Flat", value)
         key = solution_key(item)
@@ -504,7 +505,7 @@ def train_selector(records: Iterable[Mapping[str, Any]], output: str | Path, *, 
             schema = FeatureSchema.from_dict(schema_record)
     input_size = schema.input_size if schema is not None else 8
     model = Selector(width=width, input_size=input_size, dropout=0.0)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     updates = 0
     losses: list[float] = []
     settings = {"seed": seed, "epochs": epochs, "learning_rate": learning_rate, "width": width,
@@ -624,7 +625,14 @@ def train_selector(records: Iterable[Mapping[str, Any]], output: str | Path, *, 
                         current = prefix[:index]
                         value = value + transition_logps(current)[prefix[index] if index < len(prefix) else STOP]
                     logps.append(value)
-                    terminal_costs.append(exact_cost(terminal))
+                    # Equation (25) uses measured lifecycle cost for the
+                    # successful terminal, not the input-budget token count.
+                    # Pilot fixtures predating this field fall back to the
+                    # exact builder-input cost so they remain loadable, while
+                    # formal compiler archives carry lifecycle_cost.
+                    terminal_costs.append(float(solution.get("lifecycle_cost")
+                                                if solution.get("lifecycle_cost") is not None
+                                                else exact_cost(terminal)))
                 if not logps:
                     continue
                 loss = sequence_loss(torch.stack(logps), terminal_costs, budget)

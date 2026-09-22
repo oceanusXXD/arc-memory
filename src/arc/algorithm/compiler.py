@@ -156,7 +156,11 @@ def _query_metrics(config: dict[str, Any], row: dict[str, Any], result: Any,
     evaluate_live = bool(compiler_cfg.get("evaluate_queries", False))
     query_scores: list[float] = []
     usage_rows: list[dict[str, Any]] = []
-    state = Update(PersistentMemoryState(), result.memories, selected,
+    previous = row.get("memory_before")
+    if previous is None:
+        previous = row.get("persistent_memory")
+    base_state = PersistentMemoryState.from_dict(previous) if isinstance(previous, Mapping) else PersistentMemoryState()
+    state = Update(base_state, result.memories, selected,
                    architecture=architecture, source_ids=result.selected)
     for query in queries:
         if query.get("utility") is not None:
@@ -196,8 +200,12 @@ def _query_metrics(config: dict[str, Any], row: dict[str, Any], result: Any,
     tau_cov = float(compiler_cfg.get("tau_coverage", 0.5))
     utility = sum(query_scores) / len(query_scores)
     coverage = sum(score >= tau_q for score in query_scores) / len(query_scores)
+    # C_i counts the actual write path.  Auditor calls belong to offline
+    # certification and must not be mistaken for Build generation cost.
     write_tokens = [int(item.get("total_tokens")) for item in result.usage
-                    if item.get("total_tokens") is not None and item.get("usage_complete", True)]
+                    if item.get("role") == "builder"
+                    and item.get("total_tokens") is not None
+                    and item.get("usage_complete", True)]
     read_tokens = [int(item.get("total_tokens")) for item in usage_rows
                    if item.get("total_tokens") is not None and item.get("usage_complete", True)]
     lifecycle_cost = None
@@ -221,9 +229,12 @@ def _certify_result(config: dict[str, Any], row: dict[str, Any], result: Any,
     return replace(result, status=metrics["status"]), metrics
 
 
-def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16, d: int = 8, full_result=None) -> dict[str, Any]:
+def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int | None = None, d: int = 8, full_result=None) -> dict[str, Any]:
     question = str(row.get("question") or "")
-    raw_sources = list(row.get("sources") or row.get("evidence") or [])
+    # ``candidate_sources`` is the formal E_i=C(X_i,M_i^-) boundary.  The
+    # legacy ``sources`` key remains accepted for already materialized input
+    # rows and means the same query-independent candidate set.
+    raw_sources = list(row.get("candidate_sources") or row.get("sources") or row.get("evidence") or [])
     sources, _ = normalize_sources(raw_sources)
     source_map = {str(source.get("source_id", source["id"])): int(source["id"]) for source in sources}
     annotation = annotation_from_row(row, source_map)
@@ -365,7 +376,14 @@ def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16
         results_by_architecture[architecture] = cache
         for candidate, status in records.items():
             result = cache[candidate]
-            combo = solution_record(architecture, candidate, cost=cost(candidate), status=status)
+            candidate_metrics = full_metrics if candidate == ids else metrics_by_architecture[architecture].get(candidate, {})
+            combo = solution_record(
+                architecture,
+                candidate,
+                cost=cost(candidate),
+                lifecycle_cost=candidate_metrics.get("lifecycle_cost"),
+                status=status,
+            )
             combo.update({
                 "raw_output": result.raw,
                 "memories": list(result.memories),
@@ -375,7 +393,7 @@ def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16
                 "usage": list(result.usage),
                 "witness": [witnesses[candidate][0], sorted(witnesses[candidate][1]), sorted(witnesses[candidate][2])],
             })
-            metrics = full_metrics if candidate == ids else metrics_by_architecture[architecture].get(candidate, {})
+            metrics = candidate_metrics
             combo.update({key: value for key, value in metrics.items()
                           if key in {"query_scores", "utility", "coverage", "lifecycle_cost", "query_usage", "reason",
                                      "tau_query", "tau_utility", "tau_coverage"}})
@@ -409,7 +427,14 @@ def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16
             architecture_bounds[architecture] = bounds(domain, records, budget_cost, budget)
             reachable_solutions.extend(solution_record(architecture, candidate, cost=budget_cost(candidate)) for candidate in feasible)
             successful_solutions.extend(
-                solution_record(architecture, candidate, cost=budget_cost(candidate), status=records.get(candidate, "UNKNOWN"))
+                solution_record(
+                    architecture,
+                    candidate,
+                    cost=budget_cost(candidate),
+                    lifecycle_cost=metrics_by_architecture[architecture].get(candidate, {}).get("lifecycle_cost"),
+                    status=records.get(candidate, "UNKNOWN"),
+                    utility=metrics_by_architecture[architecture].get(candidate, {}).get("utility"),
+                )
                 for candidate in feasible if records.get(candidate) == PASS
             )
         budget_records[str(budget)] = {
@@ -423,10 +448,16 @@ def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16
     flat_full = full_by_architecture["Flat"]
     flat_metrics = metrics_by_architecture["Flat"].get(frozenset(int(source["id"]) for source in sources), {})
     successful_solutions = [solution_record(item["architecture"], item["source_ids"], cost=item.get("cost"),
+                                            lifecycle_cost=item.get("lifecycle_cost"),
                                             status=item.get("status"), utility=item.get("utility"))
                             for item in evaluations if item["status"] == PASS]
+    domain_complete = all(
+        candidate in records_by_architecture[architecture]
+        for architecture, domain in domains.items()
+        for candidate in domain
+    )
     return {
-        "schema": "arc", "sample_id": row.get("sample_id"), "qa_id": row.get("qa_id"), "domain_complete": True, "question": question,
+        "schema": "arc", "sample_id": row.get("sample_id"), "qa_id": row.get("qa_id"), "domain_complete": domain_complete, "question": question,
         "sources": sources, "budget": input_limit, "budgets": budget_records,
         "full": {"architecture": "Flat", "status": flat_full.status, "raw_output": flat_full.raw,
                  "memories": list(flat_full.memories), "usage": list(flat_full.usage),
@@ -452,7 +483,7 @@ def compile_task(config: dict[str, Any], row: dict[str, Any], *, limit: int = 16
     }
 
 
-def compile_file(config: dict[str, Any], input_path: str | Path, output: str | Path | None = None, *, limit: int = 16, d: int = 8) -> dict[str, Any]:
+def compile_file(config: dict[str, Any], input_path: str | Path, output: str | Path | None = None, *, limit: int | None = None, d: int = 8) -> dict[str, Any]:
     target = Path(output) if output else run_dir(config) / "compilation.jsonl"
 
     def rows() -> Iterable[dict[str, Any]]:
@@ -469,7 +500,8 @@ def main() -> None:
     parser.add_argument("--config", default="configs/locomo.yaml")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output")
-    parser.add_argument("--limit", type=int, default=16)
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Optional pilot cap; omit it to evaluate the complete candidate domain")
     parser.add_argument("--d", type=int, default=8)
     args = parser.parse_args()
     print(json.dumps(compile_file(load_config(args.config), args.input, args.output, limit=args.limit, d=args.d), ensure_ascii=False, indent=2))

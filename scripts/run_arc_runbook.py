@@ -349,7 +349,7 @@ def assess(ledger):
     full_expected = len(core)
     scope = ledger.data.get("annotation_scope") or {}
     expected = scope.get("total_target", full_expected)
-    ledger.data.setdefault("protocol", {"selector_seeds": [7, 17, 27], "budgets": [1024, 2048, 4096], "epochs": 30, "primary_seed": 7, "compile_limit": 16, "compile_d": 8})
+    ledger.data.setdefault("protocol", {"selector_seeds": [7, 17, 27], "budgets": [1024, 2048, 4096], "epochs": 30, "primary_seed": 7, "compile_limit": None, "compile_d": 8})
     annotation_index = index_records("data/processed/requirements.train-dev.jsonl")
     annotations = len(annotation_index)
     compiled_path = Path("runs/locomo_arc/compilation.train-dev.jsonl")
@@ -564,14 +564,33 @@ _INPUT_WORKER = {}
 def init_input_worker():
     from arc.agent.config import load_config
     from arc.agent.data.retrieval import load_retrieval, blocks_by_source
+    from arc.agent.data.locomo import load_blocks
+    from arc.agent.data.requirements import _frozen_vectors
     config = load_config("configs/locomo.yaml")
-    _INPUT_WORKER.update(config=config, cache=load_retrieval(config), lookup=blocks_by_source([r for _, r in rows("data/processed/locomo_blocks.jsonl")]))
+    blocks = load_blocks(config)
+    history_by_sample = {}
+    for block in blocks:
+        history_by_sample.setdefault(str(block.get("sample_id")), []).append(block)
+    vectors_by_sample, metadata_by_sample = _frozen_vectors(config)
+    _INPUT_WORKER.update(
+        config=config,
+        cache=load_retrieval(config),
+        lookup=blocks_by_source(blocks),
+        history_by_sample=history_by_sample,
+        vectors_by_sample=vectors_by_sample,
+        metadata_by_sample=metadata_by_sample,
+    )
 
 
 def make_input(item):
     from arc.agent.data.requirements import _compiler_row
     from arc.algorithm.memory import configured_input_cost
-    row = _compiler_row(_INPUT_WORKER["config"], _INPUT_WORKER["cache"][item], _INPUT_WORKER["lookup"])
+    row = _compiler_row(
+        _INPUT_WORKER["config"], _INPUT_WORKER["cache"][item], _INPUT_WORKER["lookup"],
+        history_by_sample=_INPUT_WORKER["history_by_sample"],
+        vectors_by_sample=_INPUT_WORKER["vectors_by_sample"],
+        metadata_by_sample=_INPUT_WORKER["metadata_by_sample"],
+    )
     cost = configured_input_cost(_INPUT_WORKER["config"], row["question"], row["sources"])
     return row, cost
 
@@ -843,7 +862,9 @@ def compile_annotations(ledger, limit=None):
         task_record(ledger, key, "RUNNING")
         ledger.save()
         try:
-            result = compile_task(config, row, limit=16, d=8, full_result=original_full)
+            # Formal compilation evaluates the complete finite candidate
+            # domain.  A numeric limit is reserved for explicit pilot runs.
+            result = compile_task(config, row, limit=None, d=8, full_result=original_full)
             assert result["annotation"]["valid"] and result["domain_complete"]
             errors = [u for e in result["evaluations"] for u in e.get("usage", []) if u.get("status") == "error"]
             if errors:
@@ -858,7 +879,7 @@ def compile_annotations(ledger, limit=None):
             ledger.block("compiler_service", str(exc), qa_id=qid)
             resource_summary(ledger)
             return
-        result.update(split=row["split"], category=row["category"], input_sha256=reference["sha256"], provenance={"key": key, "teacher_model": row.get("teacher_model", "grok-4.6"), "limit": 16, "d": 8})
+        result.update(split=row["split"], category=row["category"], input_sha256=reference["sha256"], provenance={"key": key, "teacher_model": row.get("teacher_model", "grok-4.6"), "limit": None, "d": 8})
         done[qid] = append_record(target, result)
         task_record(ledger, key, "COMPLETE", artifact=done[qid],
                     successful_solutions=len(result.get("successful_solutions") or result.get("successful_sets") or []),
@@ -891,7 +912,7 @@ def train(ledger):
     if not path.exists():
         write_jsonl(path, (r for _, r in rows(source) if r.get("split") == "train"))
     assert [r["qa_id"] for _, r in rows(path)] == qa_ids
-    ledger.data.setdefault("protocol", {"selector_seeds": [7, 17, 27], "budgets": [1024, 2048, 4096], "epochs": 30, "primary_seed": 7, "compile_limit": 16, "compile_d": 8})
+    ledger.data.setdefault("protocol", {"selector_seeds": [7, 17, 27], "budgets": [1024, 2048, 4096], "epochs": 30, "primary_seed": 7, "compile_limit": None, "compile_d": 8})
     ledger.save("selector_training")
     for seed in ledger.data["protocol"]["selector_seeds"]:
         config["seed"] = seed

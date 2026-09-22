@@ -212,13 +212,16 @@ def architecture_utility(status: str) -> float:
 
 
 def solution_record(architecture: str, source_ids: Iterable[int], *, cost: int | None = None,
-                    status: str | None = None, utility: float | None = None) -> dict[str, Any]:
+                    lifecycle_cost: float | None = None, status: str | None = None,
+                    utility: float | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {
         "architecture": normalize_architecture(architecture),
         "source_ids": sorted({int(value) for value in source_ids}),
     }
     if cost is not None:
         result["cost"] = int(cost)
+    if lifecycle_cost is not None:
+        result["lifecycle_cost"] = float(lifecycle_cost)
     if status is not None:
         result["status"] = str(status).upper()
         result["utility"] = architecture_utility(status) if utility is None else float(utility)

@@ -50,12 +50,11 @@ python scripts/check_credentials.py
 
 ## 离线编译
 
-先从冻结检索缓存生成 compiler 输入。该命令不调用模型，只整理
-`question + sources`；需求标注会在离线编译阶段由 compiler/teacher 生成：
+先从会话历史和冻结来源向量生成与问题无关的 compiler 候选输入。该命令不调用模型；需求标注会在离线编译阶段由 compiler/teacher 生成：
 
     python -m arc.agent.data.requirements --config configs/locomo.yaml
 
-输入 JSONL 每行包含 question、sources、requirements，以及每项需求的 packages。Full 总是先评估；最多评估 16 个不同完整输入，UNKNOWN 不会被当作 FAIL。非空输入只调用一次 G，空输入成本和调用数均为零。
+输入 JSONL 每行包含候选 sources、future_queries、requirements，以及每项需求的 packages。正式编译默认评估完整有限候选域，UNKNOWN 不会被当作 FAIL。非空输入只调用一次 G，空输入成本和调用数均为零。
 
     python -m arc.algorithm.compiler --config configs/locomo.yaml --input data/processed/requirements.jsonl --output runs/locomo_arc/compilation.jsonl
 
@@ -78,4 +77,4 @@ python scripts/check_credentials.py
 
     python -m arc.baseline.evaluate run --config configs/locomo.yaml --arms no_memory full_memory naive_rag rank_pack our --split final --limit 1
 
-规范文档：方法章节见 [docs/papers/3_method.md](docs/papers/3_method.md)；实验运行说明见 [docs/runbook.md](docs/runbook.md)。
+规范文档：方法章节见 [docs/papers/3_method.md](docs/papers/3_method.md)，算法实现说明见 [docs/algorithm.md](docs/algorithm.md)。

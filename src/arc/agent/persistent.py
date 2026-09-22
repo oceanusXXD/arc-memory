@@ -140,7 +140,12 @@ class PersistentMemoryState:
         return [copy.deepcopy(item[2]) for item in scored[: max(0, int(top_k))]]
 
     def render(self, query: str = "", *, top_k: int = 8) -> str:
-        entries = self.retrieve(query, top_k=top_k)
+        return self.render_entries(self.retrieve(query, top_k=top_k))
+
+    @staticmethod
+    def render_entries(entries: Iterable[Mapping[str, Any]]) -> str:
+        """Render an already retrieved result without issuing a second read."""
+        entries = list(entries)
         if not entries:
             return "Persistent memory: (empty)"
         lines = ["Persistent memory:"]

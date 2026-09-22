@@ -93,7 +93,7 @@ class Memory:
         from arc.agent.persistent import PersistentMemoryState, Retrieve
         state = request.memory_state if isinstance(request.memory_state, PersistentMemoryState) else PersistentMemoryState.from_dict(request.memory_state)
         entries = Retrieve(request.question, state, top_k=request.top_k)
-        text = state.render(request.question, top_k=request.top_k)
+        text = state.render_entries(entries)
         source_ids = tuple(str(value) for entry in entries for value in entry.get("src", ()))
         return MemoryPacket(
             text,
