@@ -18,6 +18,26 @@ ARC 的实现遵循四条不可违反的边界：
 
 ---
 
+## 0. 技术组件和职责
+
+ARC 不是端到端地重新训练一个大语言模型。训练阶段更新的唯一模型是写入策略 \(H\) 的 `Selector`；embedding、builder、auditor、answer 模型和 tokenizer 都冻结使用。默认组件如下，均可由配置覆盖：
+
+| 组件 | 当前实现 | 作用 |
+|---|---|---|
+| 来源 embedding | `sentence-transformers` 的 `Qwen/Qwen3-Embedding-0.6B`；L2 归一化，查询向量使用 `query` prompt | 生成冻结来源向量，供 dense retrieval 和 selector 特征使用 |
+| 词法检索 | 确定性的 Unicode 分词 + Okapi BM25，\(k_1=1.5, b=0.75\) | 与查询相关的 BM25 排名 |
+| 混合排序 | dense cosine 排名与 BM25 排名做 Reciprocal Rank Fusion：\(\sum 1/(60+\mathrm{rank})\) | 生成 `hybrid_rrf` 检索缓存；默认 `top_k=128`、`rrf_k=60` |
+| 写入策略 \(H\) | PyTorch `Selector`，训练得到 checkpoint | 在写入阶段依次选择 \(S\) 和 \(g\) |
+| 构建器 \(G\) | Claude Code CLI 的 `builder` 角色，默认 `Qwen/Qwen3.5-4B` | 把选中的来源抽取成带 `src` 溯源的记忆 JSON |
+| 离线教师 | `Grok-4.6` | 为未来查询生成需求及替代支持包；不进入部署策略输入 |
+| 审核器和回答器 | Claude Code 的 `auditor`/`agent` 角色，默认 `Qwen/Qwen3.5-4B` | 分别完成来源/需求审核和回答未来查询 |
+| 构建 tokenizer | 与 builder 配置匹配的 Hugging Face tokenizer 和 chat template | 精确计算完整构建输入预算 |
+| 持久态 Retrieve | 无模型的确定性词法重叠分数 `lexical_score` | 在线查询时从已写入记忆中取回条目 |
+
+BM25、dense 和 RRF 属于查询相关的检索层，主要用于生成离线检索缓存、baseline 输入和诊断排名；它们不会被传给写入 selector。正式写入候选 \(E_i\) 由历史和持久状态构造，避免把当前问题泄漏到 \(H\) 或 \(G\)。
+
+---
+
 ## 1. 状态与候选来源
 
 第 \(i\) 个写入单元由写入前记忆状态 \(\mathcal M_i^{-}\)、新到达历史批次 \(X_i\) 和构建输入预算 \(b\) 组成。候选生成器由 `arc.agent.persistent.candidate_sources` 实现：
@@ -39,6 +59,8 @@ E_i = C(X_i, M_i^-)
 - 原始文本、会话、时间、说话人、位置、冻结向量及其他可观察元数据。
 
 离线监督编译器也遵循相同的信息边界。正式输入由会话历史和冻结来源向量构造；已经物化的候选记录仍可通过 `candidate_sources` 或 `sources` 字段重放。
+
+这里的“冻结来源向量”来自上面的 embedding 模型，并随检索缓存保存模型名、revision、维度和 prompt 名称。编译和部署必须使用相同的 metadata；selector 训练不会更新这些向量。
 
 ---
 
@@ -128,6 +150,8 @@ W_rk ⊆ E_i
 
 每项需求最多保留三个替代支持包。支持包仅用于缩小离线候选域，不会作为部署策略的输入。
 
+正式标注使用 `Grok-4.6`；compiler 会拒绝带有其他 `teacher_model` 的正式记录。构建器 \(G\)、审核器和回答器是另外的角色：它们在候选方案评估时真实调用，产生构建内容、三态审核和未来查询 usage，但这些调用的参数不会在 selector 训练时继续更新。
+
 对每个候选来源集合 \(S\) 及五种架构 \(g\)，编译器执行：
 
 ```text
@@ -169,7 +193,7 @@ W_b(i) = {(S, g): status(S, g) = PASS and Reach_b(S, g) = 1}
 
 ## 5. 内容优先选择器
 
-选择器由 `arc.algorithm.selector.Selector` 实现，联合概率分解为：
+选择器由 `arc.algorithm.selector.Selector` 实现。它是训练得到的 Transformer-based selector：Transformer encoder 负责编码候选来源，GRU 指针头负责按序选择来源，架构头负责选择五种组织架构。联合概率分解为：
 
 ```text
 P(S, g | E, b) = p_phi(S | E, b) * p_psi(g | S, E, b)
@@ -181,14 +205,30 @@ P(S, g | E, b) = p_phi(S | E, b) * p_psi(g | S, E, b)
 
 `FeatureSchema` 使用冻结来源向量和可观察元数据构造特征。写入阶段不会使用缓存 query vector；候选集合向量中心只作为集合上下文表示。
 
+对来源 \(e_j\) 的向量记为 \(v_j\)，候选集合中心为
+
+```text
+c_E = normalize(mean_j(v_j))
+```
+
+写入阶段把 \(c_E\) 放在原本的 query 槽位，而不是放入当前问题的向量。单个来源的主要输入为：
+
+```text
+[v_j, c_E, v_j ⊙ c_E, |v_j - c_E|,
+ normalized_numeric, missing_flags, speaker_one_hot, budget_features]
+```
+
 特征包括：
 
 - 来源向量和候选集合表示；
 - 来源与集合上下文之间的交互与差异；
-- 位置、长度、时间、检索分数、会话和说话人信息；
+- 位置、token 数、相对时间、检索分数、BM25/dense/RRF 排名（字段存在时）、会话和说话人信息；
+- 数值字段的训练集均值/尺度归一化，以及缺失标志；
 - 当前预算特征。
 
 因此，对于同一个 \((E,b)\)，即使传入不同 query 字符串，策略特征也不会改变。
+
+当前 `Selector` 的默认结构是：输入线性投影 → 两层、四头、宽度 128、前馈宽度 512 的 Transformer encoder → `GRUCell` 来源指针头；架构头读取完整候选编码和已选来源编码，对五种架构输出 logits。拓扑实例化仍由确定性代码完成，不另训练图网络。
 
 ### 5.2 来源解码：选择 \(S\)
 
@@ -233,13 +273,15 @@ M_theta(i,b) = Σ_(S,g)∈W_b(i) P_theta(S,g | E_i,b)
 1. `-log M_theta`：提高模型对全部成功终态的总概率质量；
 2. 成功终态内部的生命周期成本偏好：相对于预算内最低成本成功方案进行归一化。
 
+训练入口 `train_selector_file` 先从编译 JSONL 拟合并冻结 `FeatureSchema`，再实例化上述 Transformer-based `Selector`，只更新它的 `state_dict`。默认配置为 Adam、学习率 `3e-4`、weight decay `0.01`、梯度裁剪 `1.0`、30 个 epoch；embedding、BM25、RRF、builder、auditor、answer 和 tokenizer 均不反向传播，也不会在训练循环中重新调用模型服务。
+
 代码使用 log-sum-exp 计算第一项，并沿完整的 \((S,g)\) 配对回传梯度。因此：
 
 - 来源选择标签与架构选择标签不会被重新组合；
 - `UNKNOWN` 和未评估方案不会被构造成负例；
 - 训练阶段不会重新调用构建器、回答模型或审核器，只读取离线编译记录。
 
-优化器为 Adam。训练时，每个更新单元和每个非空预算档案等权处理。
+优化器为 Adam。训练时，每个更新单元和每个非空预算档案等权处理。因此“训练模型”指这个 Transformer/GRU/架构头组成的 selector，而不是重新训练 Qwen、Grok 或 embedding 模型。
 
 ---
 
@@ -273,6 +315,8 @@ query(q, M_i^+):
 ```
 
 `Memory.__call__` 的 query 分支只执行一次 `Retrieve`，并将检索结果交给固定回答模型。
+
+当前持久态 `Retrieve` 对每个记忆条目把记忆文本和其来源文本拼接，用 `lexical_score` 的 token-set overlap 排序，默认取前 8 条；它不重新计算 embedding，也不调用 BM25/RRF。BM25+RRF 的查询缓存与持久态读取是两个不同层次：前者用于准备候选/基线，后者是写入后的固定读取实现。
 
 查询阶段不会调用 selector、builder 或 `Update`。
 
